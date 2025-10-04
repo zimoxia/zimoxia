@@ -62,15 +62,15 @@ domain-macro hotmail hotmail.fr ,live.com ,hotmail.co.uk ,hotmail.it ,windowsliv
 # domains that resolve to ?.mx.mail.yahoo.com
 domain-macro yahoo yahoo.com, yahoo.in, yahoo.ca, rocketmail.com, ymail.com, yahoo.com.au, geocities.com, yahoo.com.mx, braltavista.com, ameritech.net, att.net, bellsouth.net, attbroadband.com, attcanada.net, attglobal.com, attglobal.net, attnet.com, attworldnet.com, bellatlantic.net, bellatlantic.net, bellsouth.com, bellsouth.net, flash.net, netzero.net, nvbell.net, pacbell.net, prodigy.com, prodigy.net, sbcglobal.net, sbcglobal.net, snet.net, swbell.com, swbell.net, toast.net, usa.net, verizon.com, verizon.net, verizonmail.com, vzwpix.com, wans.net, worldnet.att.net, yahoo.net, gtconsultants.net, indutorres.com, micelle-inc.com
 <domain $yahoo>
-    max-msg-per-connection 2  # yahoo policy
-    max-smtp-out   20
-    max-msg-per-connection    20
+    max-msg-per-connection 100000  # yahoo policy
+    max-smtp-out   100000
+    max-msg-per-connection    10000
     smtp-greeting-timeout  5m
     mx-connection-attempts 10
     backoff-to-normal-after 2h
-    backoff-max-msg-rate  100/h
+    backoff-max-msg-rate  10000/h
     backoff-retry-after  30m
-	max-msg-rate 60/h  # prevent "exceeded the rate limit"
+	max-msg-rate 1000000/h  # prevent "exceeded the rate limit"
 	use-starttls yes
 	
     dkim-sign yes
