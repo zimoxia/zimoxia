@@ -46,14 +46,14 @@ domain-macro 126 126.com, vip.126.com
 # domains that resolve to mx?.hotmail.com
 domain-macro hotmail hotmail.fr ,live.com ,hotmail.co.uk ,hotmail.it ,windowslive.com ,live.fr ,hotmail.de ,hotmail.es ,live.co.uk ,live.it ,hotmail.co.jp ,live.com.mx ,live.nl ,live.de ,live.cn ,live.ru ,live.ca ,live.com.ar ,hotmail.co.th ,live.com.au ,live.jp ,live.se ,live.cl ,live.com.pt ,live.be ,live.dk ,hotmail.com.tr ,livemail.tw ,live.no ,hotmail.se ,hotmail.com.tw ,live.co.kr ,hotmail.co.nz ,live.at ,live.in ,hotmail.gr ,hotmail.be ,live.hk ,live.ie ,msn.cn ,hotmail.co.kr ,hotmail.no ,hotmail.ch ,live.co.za ,hotmail.com.hk ,live.com.my ,live.com.sg ,hotmail.fi ,hotmail.my ,hotmail.co.id ,hotmail.sg ,hotmail.com.au ,hotmail.co.za ,hotmail.dk ,hotmail.rs ,live.com.ph ,hotmail.ph ,hotmail.com.vn ,hotmail.cz ,hotmail.com ,msn.com ,email.msn.com ,email.hotmail.com ,webtv.com ,webtv.net
 <domain $hotmail>
-    max-smtp-out   10
-    max-msg-per-connection   2
+    max-smtp-out   100000
+    max-msg-per-connection   10000
     smtp-421-means-mx-unavailable yes
     mx-connection-attempts 10
-    backoff-to-normal-after 2h
-    backoff-max-msg-rate  30/h
-    backoff-retry-after  360m
-	max-msg-rate 60/h  # prevent "exceeded the rate limit"
+    backoff-to-normal-after 1h
+    backoff-max-msg-rate  6000/h
+    backoff-retry-after  30m
+	max-msg-rate 100000/h  # prevent "exceeded the rate limit"
 	use-starttls yes
     
     dkim-sign yes
