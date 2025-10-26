@@ -350,8 +350,8 @@ records t
 delete-file-holders yes
 </spool> 
 
-http-mgmt-port 8437 
-http-access 0/0 monitor
+# http-mgmt-port 8437 
+# http-access 0/0 monitor
 
 #######################################
 # END: OTHER OPTIONS
