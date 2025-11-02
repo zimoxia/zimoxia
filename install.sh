@@ -58,14 +58,37 @@ pkg_install_redhat() {
 
 systemd_try() {
   local action="$1"; shift
+
+  # 特殊动作：daemon-reload 本身不接服务名
+  if [[ "$action" == "daemon-reload" ]]; then
+    echo "[TRY] systemctl daemon-reload"
+    systemctl daemon-reload 2>/dev/null || true
+    return 0
+  fi
+
+  # enable 之前先 reload，避免新 unit 看不到
+  if [[ "$action" == "enable" ]]; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+
+  local svc alt
   for svc in "$@"; do
-    if systemctl list-unit-files | grep -q "^${svc}\.service"; then
-      systemctl "$action" "$svc" || true
-    else
-      [ "$svc" = "pmtahttp" ] && systemctl list-unit-files | grep -q "^pmtahttpd\.service" && systemctl "$action" pmtahttpd || true
+    alt="$svc"
+    [[ "$svc" == "pmtahttp" ]] && alt="pmtahttpd"
+
+    echo "[TRY] systemctl $action $alt"
+    systemctl "$action" "$alt" 2>/dev/null || true
+
+    # restart 失败 → 尝试 start
+    if [[ "$action" == "restart" ]]; then
+      if ! systemctl is-active --quiet "$alt" 2>/dev/null; then
+        echo "[FALLBACK] systemctl start $alt"
+        systemctl start "$alt" 2>/dev/null || true
+      fi
     fi
   done
 }
+
 
 ensure_pmta_user() {
   getent group pmta >/dev/null 2>&1 || groupadd -r pmta
@@ -182,24 +205,10 @@ fi
 [ -f usr/sbin/pmtad ]     && cp -f usr/sbin/pmtad /usr/sbin/pmtad
 [ -f usr/sbin/pmtahttpd ] && cp -f usr/sbin/pmtahttpd /usr/sbin/pmtahttpd
 
-# license：若是文件→复制为 powermta.lic；若是目录→复制其中文件；坚决避免目录嵌套
-echo "[STEP] Copy license"
-mkdir -p /etc/pmta/license
-if [ -e "license" ]; then
-  if [ -f "license" ]; then
-    install -m 600 -o pmta -g pmta "license" /etc/pmta/license/powermta.lic
-  elif [ -d "license" ]; then
-    # 优先复制 *.lic；若无，再兜底复制所有文件
-    cp -f license/*.lic /etc/pmta/license/ 2>/dev/null || true
-    find license -maxdepth 1 -type f ! -name "*.lic" -exec cp -f {} /etc/pmta/license/ \; 2>/dev/null || true
-    chown pmta:pmta /etc/pmta/license/* 2>/dev/null || true
-    chmod 600 /etc/pmta/license/* 2>/dev/null || true
-  fi
-  echo "[OK] License placed under /etc/pmta/license"
-else
-  echo "[WARN] No 'license' found in $PMTA_EXTRACT_DIR. PMTA may not start."
-fi
-popd >/dev/null
+cp -f license /etc/pmta/license
+chown pmta:pmta /etc/pmta/license 2>/dev/null || true
+chmod 600 /etc/pmta/license 2>/dev/null || true
+
 
 # 权限 & 配置自检
 chown -R pmta:pmta /etc/pmta || true
