@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 # ========================
@@ -15,27 +15,11 @@ EMAIL_PREFIX="$3"
 EMAIL_PASSWORD="$4"
 DKIM_SELECTOR="default"
 
-CONFIG_SRC="./conf/config"
+CONFIG_TEMPLATE="./conf/config"
 PMTA_ZIP="./pmta5.0r3.zip"
 PMTA_EXTRACT_DIR="pmta5.0r3"
 
-# ========================
-# Prechecks
-# ========================
-if [ "$EUID" -ne 0 ]; then
-  echo "[ERR] Please run as root (use sudo)."
-  exit 1
-fi
-
-if [ ! -f "$CONFIG_SRC" ]; then
-  echo "[ERR] Config file not found at $CONFIG_SRC"
-  exit 1
-fi
-
-if [ ! -f "$PMTA_ZIP" ]; then
-  echo "[ERR] PowerMTA zip not found: $PMTA_ZIP"
-  exit 1
-fi
+export DEBIAN_FRONTEND=noninteractive
 
 # ========================
 # Helpers
@@ -53,56 +37,45 @@ detect_os() {
 }
 
 pkg_install_debian() {
-  export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  # Apache2 / MySQL / PHP 依赖：按需增减
-  apt-get install -y \
+  apt-get install -y --no-install-recommends \
     opendkim opendkim-tools \
     apache2 php \
     mysql-server php-mysql php-gd php-imap \
-    unzip curl ca-certificates
+    unzip curl ca-certificates net-tools
 }
 
 pkg_install_redhat() {
-  # 某些最小化镜像只有 dnf 或 yum
   local PM=dnf
   is_cmd yum && PM=yum
   $PM -y install \
-    opendkim opendkim-tools \
+    opendkim \
     httpd php \
     mariadb-server php-mysqlnd php-gd php-imap \
-    unzip curl ca-certificates
+    unzip curl ca-certificates net-tools
   systemctl enable mariadb || true
 }
 
 systemd_try() {
-  # $1 action, $2.. services
   local action="$1"; shift
   for svc in "$@"; do
     if systemctl list-unit-files | grep -q "^${svc}\.service"; then
       systemctl "$action" "$svc" || true
     else
-      # 兼容某些包的服务命名差异
-      case "$svc" in
-        pmtahttp)
-          if systemctl list-unit-files | grep -q "^pmtahttpd\.service"; then
-            systemctl "$action" pmtahttpd || true
-          fi
-        ;;
-      esac
+      # 某些发行包服务名可能是 pmtahttpd
+      if [ "$svc" = "pmtahttp" ] && systemctl list-unit-files | grep -q "^pmtahttpd\.service"; then
+        systemctl "$action" pmtahttpd || true
+      fi
     fi
   done
 }
 
-ensure_user_group() {
-  # 某些环境未创建 pmta 用户/组时避免 chown 失败
+ensure_pmta_user() {
   getent group pmta >/dev/null 2>&1 || groupadd -r pmta
-  id -u pmta >/dev/null 2>&1 || useradd -r -g pmta -d /etc/pmta -s /sbin/nologin pmta
+  id -u pmta >/dev/null 2>&1 || useradd -r -g pmta -d /etc/pmta -s /usr/sbin/nologin pmta
 }
 
-safe_sed_replace() {
-  # 便于反复执行，使用占位符式替换（如果你的 conf/config 已经是示例值，可直接替换）
-  # 兼容 GNU sed：-i.bak 生成备份
+safe_replace_placeholders() {
   local file="$1"
   sed -i.bak \
     -e "s/domain\.com/$DOMAIN/g" \
@@ -117,94 +90,142 @@ safe_sed_replace() {
 # ========================
 OS=$(detect_os)
 echo "[INFO] Detected OS family: $OS"
+if [ "$OS" = "unknown" ]; then
+  echo "[ERR] Unsupported OS."
+  exit 1
+fi
 
-echo "[STEP] Update config placeholders -> /etc/pmta/config"
+# 基础目录
 mkdir -p /etc/pmta
-cp -f "$CONFIG_SRC" /etc/pmta/config
-safe_sed_replace /etc/pmta/config
-echo "[OK] /etc/pmta/config updated."
+ensure_pmta_user
 
-echo "[STEP] Install dependencies"
-case "$OS" in
-  debian) pkg_install_debian ;;
-  redhat) pkg_install_redhat ;;
-  *) echo "[ERR] Unsupported OS. Only Debian/Ubuntu or RHEL/CentOS are supported."; exit 1 ;;
-esac
+# 如果系统尚无 config，则用模板生成；如果已有，绝不覆盖
+if [ ! -f /etc/pmta/config ]; then
+  if [ ! -f "$CONFIG_TEMPLATE" ]; then
+    echo "[ERR] /etc/pmta/config not found and no template at $CONFIG_TEMPLATE"
+    exit 1
+  fi
+  echo "[STEP] Creating initial /etc/pmta/config from template"
+  cp -f "$CONFIG_TEMPLATE" /etc/pmta/config
+  safe_replace_placeholders /etc/pmta/config
+else
+  echo "[INFO] /etc/pmta/config exists; will NOT overwrite."
+fi
 
-echo "[STEP] Generate DKIM keys via OpenDKIM"
+# 安装依赖
+echo "[STEP] Installing dependencies"
+if [ "$OS" = "debian" ]; then
+  pkg_install_debian
+else
+  pkg_install_redhat
+fi
+
+# 生成 DKIM（可幂等）
+echo "[STEP] Generating DKIM keys"
 DKIM_DIR="/etc/pmta"
-mkdir -p "$DKIM_DIR"
 pushd "$DKIM_DIR" >/dev/null
-# 清理可能已有的默认文件，避免 opendkim-genkey 覆盖报错
-rm -f "${DKIM_SELECTOR}.private" "${DKIM_SELECTOR}.txt"
+rm -f "${DKIM_SELECTOR}.private" "${DKIM_SELECTOR}.txt" || true
 opendkim-genkey -s "$DKIM_SELECTOR" -d "$DOMAIN"
 mv "${DKIM_SELECTOR}.private" "${DOMAIN}-dkim.key"
 mv "${DKIM_SELECTOR}.txt"     "${DOMAIN}-dkim.txt"
 chmod 600 "${DOMAIN}-dkim.key"
 popd >/dev/null
+chown -R pmta:pmta /etc/pmta || true
 echo "[OK] DKIM key: ${DKIM_DIR}/${DOMAIN}-dkim.key"
 echo "[OK] DKIM TXT: ${DKIM_DIR}/${DOMAIN}-dkim.txt"
 
-echo "[STEP] Unzip PowerMTA package"
+# 解压安装包
+if [ ! -f "$PMTA_ZIP" ]; then
+  echo "[ERR] Missing $PMTA_ZIP"
+  exit 1
+fi
+echo "[STEP] Unzipping $PMTA_ZIP"
 rm -rf "$PMTA_EXTRACT_DIR"
 unzip -q "$PMTA_ZIP"
-cd "$PMTA_EXTRACT_DIR"
 
-echo "[STEP] Stop PMTA services (if any)"
+# 停服务（若已存在）
 systemd_try stop pmta pmtahttp pmtahttpd
 
-echo "[STEP] Install PowerMTA"
+# 安装 PowerMTA
+echo "[STEP] Installing PowerMTA"
+pushd "$PMTA_EXTRACT_DIR" >/dev/null
 if [ "$OS" = "debian" ]; then
-  # 优先 .deb
   DEB_FILE=$(ls -1 *.deb 2>/dev/null | head -n1 || true)
   if [ -n "${DEB_FILE:-}" ]; then
-    dpkg -i "$DEB_FILE" || apt-get install -f -y
+    echo "[INFO] Installing $DEB_FILE (keep existing /etc/pmta/config)"
+    apt-get install -y -o Dpkg::Options::="--force-confold" "./$DEB_FILE"
   else
-    # 兜底：如果压缩包里只有 rpm（极少数情况）
     RPM_FILE=$(ls -1 *.rpm 2>/dev/null | head -n1 || true)
     if [ -n "${RPM_FILE:-}" ]; then
-      echo "[WARN] No .deb found, but RPM exists. Converting via alien..."
+      echo "[WARN] No .deb found; converting rpm via alien (keep config)"
       apt-get install -y alien
       alien -i "$RPM_FILE"
     else
-      echo "[ERR] No PowerMTA package (*.deb or *.rpm) found in $PMTA_EXTRACT_DIR"
+      echo "[ERR] No PowerMTA package (*.deb or *.rpm) found."
       exit 1
     fi
   fi
 else
-  # RHEL/CentOS
+  local_pm=dnf
+  is_cmd yum && local_pm=yum
   RPM_FILE=$(ls -1 *.rpm 2>/dev/null | head -n1 || true)
   if [ -n "${RPM_FILE:-}" ]; then
-    local_pm=yum
-    is_cmd dnf && local_pm=dnf
-    $local_pm -y install "$RPM_FILE"
+    $local_pm -y install "./$RPM_FILE"
   else
-    echo "[ERR] No RPM found for RHEL/CentOS"
+    echo "[ERR] No RPM found for RHEL/CentOS."
     exit 1
   fi
 fi
 
-echo "[STEP] Copy binaries/license/config if present in package tree (idempotent)"
-# 某些包会把这些文件也包含在解包目录的 usr/ 或 license/ 下
-ensure_user_group
-[ -f usr/sbin/pmtad ]      && cp -f usr/sbin/pmtad /usr/sbin/pmtad
-[ -f usr/sbin/pmtahttpd ]  && cp -f usr/sbin/pmtahttpd /usr/sbin/pmtahttpd
-[ -d license ]             && mkdir -p /etc/pmta/license && cp -rf license/* /etc/pmta/license/ || true
+# 拷贝可执行文件（若包里提供了额外版本）
+[ -f usr/sbin/pmtad ]     && cp -f usr/sbin/pmtad /usr/sbin/pmtad
+[ -f usr/sbin/pmtahttpd ] && cp -f usr/sbin/pmtahttpd /usr/sbin/pmtahttpd
 
-# 确保权限
+# 复制 license（不论文件还是目录，统一拷到 /etc/pmta/license）
+echo "[STEP] Copy license"
+mkdir -p /etc/pmta/license
+if [ -e "license" ]; then
+  # 先整体拷贝（兼容 license 为文件/目录）
+  cp -rf "license" /etc/pmta/ 2>/dev/null || true
+  # 若是目录，拷贝其中文件到目标目录
+  cp -rf "license"/* /etc/pmta/license/ 2>/dev/null || true
+  echo "[OK] License copied to /etc/pmta/license"
+else
+  echo "[WARN] No 'license' found in $PMTA_EXTRACT_DIR. PMTA may not start."
+fi
+
+popd >/dev/null
+
+# 权限修正
 chown -R pmta:pmta /etc/pmta || true
 
-echo "[STEP] Enable & restart PMTA services"
-# 部分安装包服务名是 pmtahttp 或 pmtahttpd，下面都尝试
+# 配置自检（若 pmta 在 PATH）
+if is_cmd pmta; then
+  echo "[STEP] pmta --config-test"
+  if ! pmta --config-test; then
+    echo "[ERR] Config test failed. Please check /etc/pmta/config"
+  fi
+fi
+
+# 启动服务
+echo "[STEP] Starting PMTA services"
 systemd_try daemon-reload
 systemd_try enable pmta pmtahttp pmtahttpd
 systemd_try restart pmta pmtahttp pmtahttpd
+
+# 状态与端口检测
+echo "[STEP] Service status"
+systemctl --no-pager --full status pmta || true
+
+echo "[STEP] Listening ports (25/587)"
+if is_cmd netstat; then
+  netstat -tulnp | grep -E ":25|:587" || true
+fi
 
 echo
 echo "============================ DKIM TXT (add to DNS) ============================"
 cat "${DKIM_DIR}/${DOMAIN}-dkim.txt" || true
 echo "==============================================================================="
-echo "[DONE] PowerMTA installation & basic config completed."
+echo "[DONE] PowerMTA installation finished (non-interactive)."
 echo "[INFO] Config: /etc/pmta/config"
-echo "[INFO] DKIM key: ${DKIM_DIR}/${DOMAIN}-dkim.key"
-echo "[INFO] DKIM txt: ${DKIM_DIR}/${DOMAIN}-dkim.txt"
+echo "[INFO] License: /etc/pmta/license"
