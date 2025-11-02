@@ -62,10 +62,7 @@ systemd_try() {
     if systemctl list-unit-files | grep -q "^${svc}\.service"; then
       systemctl "$action" "$svc" || true
     else
-      # 某些发行包服务名可能是 pmtahttpd
-      if [ "$svc" = "pmtahttp" ] && systemctl list-unit-files | grep -q "^pmtahttpd\.service"; then
-        systemctl "$action" pmtahttpd || true
-      fi
+      [ "$svc" = "pmtahttp" ] && systemctl list-unit-files | grep -q "^pmtahttpd\.service" && systemctl "$action" pmtahttpd || true
     fi
   done
 }
@@ -85,34 +82,45 @@ safe_replace_placeholders() {
     "$file"
 }
 
+pmta_config_test() {
+  echo "[STEP] Config test"
+  # 优先使用新版语法；若失败再试旧参数
+  if pmta test config >/dev/null 2>&1; then
+    if ! pmta test config; then
+      echo "[ERR] pmta test config failed."
+      return 1
+    fi
+  elif pmta --config-test >/dev/null 2>&1; then
+    if ! pmta --config-test; then
+      echo "[ERR] pmta --config-test failed."
+      return 1
+    fi
+  else
+    echo "[WARN] No known pmta config test command found; skipping."
+  fi
+}
+
 # ========================
 # Begin
 # ========================
 OS=$(detect_os)
 echo "[INFO] Detected OS family: $OS"
-if [ "$OS" = "unknown" ]; then
-  echo "[ERR] Unsupported OS."
-  exit 1
-fi
+[ "$OS" = "unknown" ] && { echo "[ERR] Unsupported OS."; exit 1; }
 
-# 基础目录
 mkdir -p /etc/pmta
 ensure_pmta_user
 
-# 如果系统尚无 config，则用模板生成；如果已有，绝不覆盖
+# 仅当系统无 config 时，用模板生成
 if [ ! -f /etc/pmta/config ]; then
-  if [ ! -f "$CONFIG_TEMPLATE" ]; then
-    echo "[ERR] /etc/pmta/config not found and no template at $CONFIG_TEMPLATE"
-    exit 1
-  fi
-  echo "[STEP] Creating initial /etc/pmta/config from template"
+  [ -f "$CONFIG_TEMPLATE" ] || { echo "[ERR] Missing template $CONFIG_TEMPLATE"; exit 1; }
+  echo "[STEP] Creating /etc/pmta/config from template"
   cp -f "$CONFIG_TEMPLATE" /etc/pmta/config
   safe_replace_placeholders /etc/pmta/config
 else
   echo "[INFO] /etc/pmta/config exists; will NOT overwrite."
 fi
 
-# 安装依赖
+# 依赖
 echo "[STEP] Installing dependencies"
 if [ "$OS" = "debian" ]; then
   pkg_install_debian
@@ -120,7 +128,7 @@ else
   pkg_install_redhat
 fi
 
-# 生成 DKIM（可幂等）
+# DKIM
 echo "[STEP] Generating DKIM keys"
 DKIM_DIR="/etc/pmta"
 pushd "$DKIM_DIR" >/dev/null
@@ -134,16 +142,13 @@ chown -R pmta:pmta /etc/pmta || true
 echo "[OK] DKIM key: ${DKIM_DIR}/${DOMAIN}-dkim.key"
 echo "[OK] DKIM TXT: ${DKIM_DIR}/${DOMAIN}-dkim.txt"
 
-# 解压安装包
-if [ ! -f "$PMTA_ZIP" ]; then
-  echo "[ERR] Missing $PMTA_ZIP"
-  exit 1
-fi
+# 解压
+[ -f "$PMTA_ZIP" ] || { echo "[ERR] Missing $PMTA_ZIP"; exit 1; }
 echo "[STEP] Unzipping $PMTA_ZIP"
 rm -rf "$PMTA_EXTRACT_DIR"
 unzip -q "$PMTA_ZIP"
 
-# 停服务（若已存在）
+# 停服务
 systemd_try stop pmta pmtahttp pmtahttpd
 
 # 安装 PowerMTA
@@ -169,58 +174,50 @@ else
   local_pm=dnf
   is_cmd yum && local_pm=yum
   RPM_FILE=$(ls -1 *.rpm 2>/dev/null | head -n1 || true)
-  if [ -n "${RPM_FILE:-}" ]; then
-    $local_pm -y install "./$RPM_FILE"
-  else
-    echo "[ERR] No RPM found for RHEL/CentOS."
-    exit 1
-  fi
+  [ -n "${RPM_FILE:-}" ] || { echo "[ERR] No RPM found for RHEL/CentOS."; exit 1; }
+  $local_pm -y install "./$RPM_FILE"
 fi
 
-# 拷贝可执行文件（若包里提供了额外版本）
+# 可执行文件（若包里附带）
 [ -f usr/sbin/pmtad ]     && cp -f usr/sbin/pmtad /usr/sbin/pmtad
 [ -f usr/sbin/pmtahttpd ] && cp -f usr/sbin/pmtahttpd /usr/sbin/pmtahttpd
 
-# 复制 license（不论文件还是目录，统一拷到 /etc/pmta/license）
+# license：若是文件→复制为 powermta.lic；若是目录→复制其中文件；坚决避免目录嵌套
 echo "[STEP] Copy license"
 mkdir -p /etc/pmta/license
 if [ -e "license" ]; then
-  # 先整体拷贝（兼容 license 为文件/目录）
-  cp -rf "license" /etc/pmta/ 2>/dev/null || true
-  # 若是目录，拷贝其中文件到目标目录
-  cp -rf "license"/* /etc/pmta/license/ 2>/dev/null || true
-  echo "[OK] License copied to /etc/pmta/license"
+  if [ -f "license" ]; then
+    install -m 600 -o pmta -g pmta "license" /etc/pmta/license/powermta.lic
+  elif [ -d "license" ]; then
+    # 优先复制 *.lic；若无，再兜底复制所有文件
+    cp -f license/*.lic /etc/pmta/license/ 2>/dev/null || true
+    find license -maxdepth 1 -type f ! -name "*.lic" -exec cp -f {} /etc/pmta/license/ \; 2>/dev/null || true
+    chown pmta:pmta /etc/pmta/license/* 2>/dev/null || true
+    chmod 600 /etc/pmta/license/* 2>/dev/null || true
+  fi
+  echo "[OK] License placed under /etc/pmta/license"
 else
   echo "[WARN] No 'license' found in $PMTA_EXTRACT_DIR. PMTA may not start."
 fi
-
 popd >/dev/null
 
-# 权限修正
+# 权限 & 配置自检
 chown -R pmta:pmta /etc/pmta || true
-
-# 配置自检（若 pmta 在 PATH）
 if is_cmd pmta; then
-  echo "[STEP] pmta --config-test"
-  if ! pmta --config-test; then
-    echo "[ERR] Config test failed. Please check /etc/pmta/config"
-  fi
+  pmta_config_test || true
 fi
 
-# 启动服务
+# 启动
 echo "[STEP] Starting PMTA services"
 systemd_try daemon-reload
 systemd_try enable pmta pmtahttp pmtahttpd
 systemd_try restart pmta pmtahttp pmtahttpd
 
-# 状态与端口检测
+# 状态 & 端口
 echo "[STEP] Service status"
 systemctl --no-pager --full status pmta || true
-
 echo "[STEP] Listening ports (25/587)"
-if is_cmd netstat; then
-  netstat -tulnp | grep -E ":25|:587" || true
-fi
+is_cmd netstat && netstat -tulnp | grep -E ":25|:587" || true
 
 echo
 echo "============================ DKIM TXT (add to DNS) ============================"
